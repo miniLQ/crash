@@ -95,7 +95,20 @@ jobs:
         zip -9 "${ZIP_NAME}" crash
         echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
+    - name: Check if tag exists
+      id: check_tag
+      run: |
+        git fetch --tags
+        if git rev-parse --verify --quiet "refs/tags/$TAG_NAME" >/dev/null; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+      env:
+        TAG_NAME: crash.${{ env.DATE }}
+
     - name: Create Release
+      if: steps.check_tag.outputs.exists == 'false'
       id: create_release
       uses: actions/create-release@v1
       env:
