@@ -1,5 +1,6 @@
 #include "defs.h"
 #include <ctype.h>
+#include "demangle.h"
 
 /* convenience struct for passing many values to helper functions */
 struct prb_map {
@@ -115,7 +116,7 @@ dump_record(struct prb_map *m, unsigned long id, int msg_flags)
 	uint64_t ts_nsec;
 	ulonglong nanos;
 	ulonglong seq;
-	int ilen = 0, i;
+	int ilen = 0, i, nlines;
 	char *desc, *info, *text, *p;
 	ulong rem;
 
@@ -201,13 +202,66 @@ dump_record(struct prb_map *m, unsigned long id, int msg_flags)
 
 	text = m->text_data + begin;
 
-	for (i = 0, p = text; i < text_len; i++, p++) {
-		if (*p == '\n')
+	if ((msg_flags & SHOW_LOG_RUST) && (text_len > BUFSIZE)) {
+		error(WARNING, "\nThe messages could be truncated!\n");
+		text_len = BUFSIZE;
+	}
+
+	for (i = 0, nlines = 0, p = text; i < text_len; i++, p++) {
+		if (*p == '\n') {
+			/*
+			 * When printing disassembly code blocks in the log, saw number
+			 * of empty lines printed and some disassembly code was missed.
+			 * So far I haven't got better solution to handle the current
+			 * case(when the input data contains several lines, those '\n'
+			 * are written one by one), here try to check if there are multiple
+			 * line breaks to decide what to do next.
+			 */
+			if ((msg_flags & SHOW_LOG_RUST) && (i != text_len - 1)) {
+				nlines++;
+				if (strlen(buf)) {
+					fprintf(fp, "%s", buf);
+					memset(buf, 0, strlen(buf));
+				}
+			}
 			fprintf(fp, "\n%s", space(ilen));
-		else if (isprint(*p) || isspace(*p))
+		} else if ((msg_flags & SHOW_LOG_RUST) && (isprint(*p) || isspace(*p))) {
+			if (nlines >= 1)
+				fputc(*p, fp);
+			else
+				sprintf(&buf[i], "%c", *p);
+		} else if (isprint(*p) || isspace(*p))
 			fputc(*p, fp);
 		else
 			fputc('.', fp);
+	}
+	/*
+	 * Try to demangle a mangled Rust symbol(calltrace) from log buffer
+	 */
+	if (msg_flags & SHOW_LOG_RUST) {
+		char *p1 = strstr(buf, "_R");
+		if (!p1)
+			p1 = strstr(buf, "_ZN");
+		char *p2 = strrchr(buf, '+');
+		if (p1 && p2) {
+			char mangled[BUFSIZE] = {0};
+			char demangled[BUFSIZE] = {0};
+			char *res;
+			size_t slen = p1 - buf;
+
+			if (slen)
+				memcpy(demangled, buf, slen);
+
+			memcpy(mangled, p1, p2-p1);
+			res = rust_demangle(mangled, DMGL_RUST);
+			if (res) {
+				snprintf(demangled+slen, BUFSIZE-slen, "%s%s", res, p2);
+				fprintf(fp, "%s",demangled);
+				free(res);
+			} else
+				fprintf(fp, "%s", buf);
+		} else
+			fprintf(fp, "%s", buf);
 	}
 
 	if (msg_flags & SHOW_LOG_DICT) {

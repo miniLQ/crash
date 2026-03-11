@@ -169,7 +169,7 @@
 #define NR_CPUS  (256)
 #endif
 #ifdef LOONGARCH64
-#define NR_CPUS  (256)
+#define NR_CPUS  (2048)
 #endif
 
 #define NR_DEVICE_DUMPS (64)
@@ -188,6 +188,13 @@
 #define HIST_BLKSIZE  (4096)
 
 static inline int string_exists(char *s) { return (s ? TRUE : FALSE); }
+
+static inline int max(int a, int b) {
+	if (a > b)
+		return a;
+	return b;
+}
+
 #define STREQ(A, B)      (string_exists((char *)A) && string_exists((char *)B) && \
 	(strcmp((char *)(A), (char *)(B)) == 0))
 #define STRNEQ(A, B)     (string_exists((char *)A) && string_exists((char *)B) && \
@@ -570,6 +577,7 @@ struct program_context {
 #define MEMSRC_LOCAL         (0x80000ULL)
 #define REDZONE             (0x100000ULL)
 #define VMWARE_VMSS_GUESTDUMP (0x200000ULL)
+#define GET_BUILD_ID (0x400000ULL)
 	char *cleanup;
 	char *namelist_orig;
 	char *namelist_debug_orig;
@@ -2274,6 +2282,14 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long request_queue_tag_set;
 	long blk_mq_tag_set_flags;
 	long blk_mq_tag_set_shared_tags;
+	long vfsmount_mnt_flags;
+	long proc_mounts_cursor;
+	long bpf_ringbuf_map_map;
+	long bpf_ringbuf_map_rb;
+	long bpf_ringbuf_consumer_pos;
+	long bpf_ringbuf_nr_pages;
+	long hrtimer_clock_base_index;
+	long klp_patch_list;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -2452,6 +2468,7 @@ struct size_table {         /* stash of commonly-used sizes */
 	long vmap_node;
 	long cpumask_t;
 	long task_struct_exit_state;
+	long bpf_ringbuf_map;
 };
 
 struct array_table {
@@ -5508,6 +5525,7 @@ void cmd_s390dbf(void);
 #endif
 void cmd_map(void);          /* kvmdump.c */
 void cmd_ipcs(void);         /* ipcs.c */
+void cmd_rustfilt(void);     /* symbols.c */
 
 /*
  *  main.c
@@ -5600,6 +5618,7 @@ void exec_args_input_file(struct command_table_entry *, struct args_input_file *
 /*
  *  tools.c
  */
+extern int MAX_MALLOC_BUFS;
 FILE *set_error(char *);
 int __error(int, char *, ...);
 #define error __error               /* avoid conflict with gdb error() */
@@ -6115,6 +6134,7 @@ extern char *help_wr[];
 extern char *help_s390dbf[];
 #endif
 extern char *help_map[];
+extern char *help_rustfilt[];
 
 /*
  *  task.c
@@ -6216,6 +6236,7 @@ void dump_kernel_table(int);
 void dump_bt_info(struct bt_info *, char *where);
 void dump_log(int);
 void parse_kernel_version(char *);
+char *vmcoreinfo_read_from_memory(const char *);
 
 #define LOG_LEVEL(v) ((v) & 0x07)
 #define SHOW_LOG_LEVEL    (0x1)
@@ -6225,6 +6246,7 @@ void parse_kernel_version(char *);
 #define SHOW_LOG_CTIME   (0x10)
 #define SHOW_LOG_SAFE    (0x20)
 #define SHOW_LOG_CALLER  (0x40)
+#define SHOW_LOG_RUST    (0x80)
 void set_cpu(int);
 void clear_machdep_cache(void);
 struct stack_hook *gather_text_list(struct bt_info *);

@@ -22,6 +22,7 @@
 #include "config.h"
 #endif
 #include "bfd.h"
+#include "demangle.h"
 
 static void store_symbols(bfd *, int, void *, long, unsigned int);
 static void store_sysmap_symbols(void);
@@ -3276,6 +3277,46 @@ load_module_filter(char *s, int type)
 
 #define AVERAGE_SYMBOL_SIZE (16)
 
+static size_t rust_demangle_symbol(const char *symbol, char *out, size_t out_size)
+{
+	int i;
+	size_t loc = 0;
+	size_t len = strlen(symbol);
+	char *buf = NULL;
+	/*
+	 * Rust symbols always start with _R (v0) or _ZN (legacy)
+	 */
+	const char *mangled_rust[] = {
+		"_R",
+		"_ZN",
+		NULL
+	};
+
+	if (!out || out_size < len)
+		return 0;
+
+	for (i = 0; mangled_rust[i]; i++) {
+		size_t sz = strlen(mangled_rust[i]);
+		char *p = memmem(symbol, len, mangled_rust[i], sz);
+		if (p) {
+			loc = p - symbol;
+			if (loc)
+				memcpy(out, symbol, loc);
+			break;
+		}
+	}
+
+	buf = rust_demangle(symbol + loc, DMGL_RUST);
+	if (buf) {
+		memcpy(out + loc, buf, strlen(buf));
+		free(buf);
+		return 1;
+	} else if (loc != 0)
+		memset(out, 0, loc);
+
+	return 0;
+}
+
 static int
 namespace_ctl(int cmd, struct symbol_namespace *ns, void *nsarg1, void *nsarg2)
 {
@@ -3284,6 +3325,7 @@ namespace_ctl(int cmd, struct symbol_namespace *ns, void *nsarg1, void *nsarg2)
 	char *name;
 	long cnt;
 	int len;
+	char demangled[BUFSIZE] = {0};
 
 	switch (cmd)
 	{
@@ -3317,6 +3359,10 @@ namespace_ctl(int cmd, struct symbol_namespace *ns, void *nsarg1, void *nsarg2)
 		sp = (struct syment *)nsarg1;
 		name = (char *)nsarg2;
 		len = strlen(name)+1;
+		if (rust_demangle_symbol(name, demangled, sizeof(demangled))) {
+			len = strlen(demangled) + 1;
+			name = demangled;
+		}
 		if ((ns->index + len) >= ns->size) { 
                         if (!(addr = realloc(ns->address, ns->size*2))) 
 				error(FATAL, "symbol name space malloc: %s\n",
@@ -4435,8 +4481,9 @@ is_compressed_kernel(char *file, char **tmp)
 	}
 	if (system(command) < 0) {
 		please_wait_done();
-		error(INFO, "%s of %s failed\n", 
-			type == GZIP ? "gunzip" : "bunzip2", file);
+		error(INFO, "%s of %s failed\n",
+			type == GZIP ? "gunzip" :
+				(type == BZIP2 ? "bunzip2" : "unxz"), file);
 		free(tempname);
 		return FALSE;
 	}
@@ -4539,7 +4586,7 @@ is_shared_object(char *file)
 
 		case EM_X86_64:
 			if (machine_type("X86_64") || machine_type("ARM64") ||
-			    machine_type("PPC64"))
+			    machine_type("PPC64") || machine_type("RISCV64"))
 				return TRUE;
 			break;
 
@@ -4884,6 +4931,38 @@ do_multiples:
                 } while(args[optind]);
         }
         else if (!others) 
+		cmd_usage(pc->curcmd, SYNOPSIS);
+}
+
+/*
+ * Demangle a mangled Rust symbol to human readable symbol
+ */
+void cmd_rustfilt(void)
+{
+	int c;
+
+	while ((c = getopt(argcnt, args, "")) != EOF) {
+		switch(c)
+		{
+		default:
+			argerrs++;
+			break;
+		}
+	}
+
+	if (argerrs)
+		cmd_usage(pc->curcmd, SYNOPSIS);
+
+	if (args[optind]) {
+		char *buf;
+
+		buf = rust_demangle(args[optind], DMGL_RUST);
+		if (buf) {
+			fprintf(fp, "%s", buf);
+			free(buf);
+		} else
+			fprintf(fp, "Not a rust symbol: \n%s", args[optind]);
+	} else
 		cmd_usage(pc->curcmd, SYNOPSIS);
 }
 
@@ -5600,7 +5679,7 @@ value_search_module_6_4(ulong value, ulong *offset)
 
 			splast = NULL;
 			for ( ; sp <= sp_end; sp++) {
-				if (machine_type("ARM64") &&
+				if ((machine_type("ARM64") || machine_type("PPC64")) &&
 				    IN_MODULE_PERCPU(sp->value, lm) &&
 				    !IN_MODULE_PERCPU(value, lm))
 					continue;
@@ -5690,10 +5769,10 @@ retry:
 		*/
 		splast = NULL;
                 for ( ; sp <= sp_end; sp++) {
-			if (machine_type("ARM64") &&
+			if ((machine_type("ARM64") || machine_type("PPC64")) &&
 			    IN_MODULE_PERCPU(sp->value, lm) &&
-			    !IN_MODULE_PERCPU(value, lm)) 
-				continue;       
+			    !IN_MODULE_PERCPU(value, lm))
+				continue;
 
 			if (value == sp->value) {
 				if (MODULE_END(sp) || MODULE_INIT_END(sp))
@@ -10613,6 +10692,10 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(vfsmount_mnt_mountpoint));
         fprintf(fp, "           vfsmount_mnt_parent: %ld\n", 
 		OFFSET(vfsmount_mnt_parent));
+	fprintf(fp, "            vfsmount_mnt_flags: %ld\n",
+		OFFSET(vfsmount_mnt_flags));
+	fprintf(fp, "            proc_mounts_cursor: %ld\n",
+		OFFSET(proc_mounts_cursor));
 	fprintf(fp, "              mount_mnt_parent: %ld\n",
 		OFFSET(mount_mnt_parent));
 	fprintf(fp, "          mount_mnt_mountpoint: %ld\n",
@@ -11677,6 +11760,8 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(hrtimer_clock_base_first));
 	fprintf(fp, "   hrtimer_clock_base_get_time: %ld\n",
 		OFFSET(hrtimer_clock_base_get_time));
+	fprintf(fp, "      hrtimer_clock_base_index: %ld\n",
+		OFFSET(hrtimer_clock_base_index));
 	fprintf(fp, "            hrtimer_base_first: %ld\n",
 		OFFSET(hrtimer_base_first));
 	fprintf(fp, "          hrtimer_base_pending: %ld\n",
@@ -11868,6 +11953,10 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "          thread_struct_gsbase: %ld\n", OFFSET(thread_struct_gsbase));
 	fprintf(fp, "              thread_struct_fs: %ld\n", OFFSET(thread_struct_fs));
 	fprintf(fp, "              thread_struct_gs: %ld\n", OFFSET(thread_struct_gs));
+	fprintf(fp, "           bpf_ringbuf_map_map: %ld\n", OFFSET(bpf_ringbuf_map_map));
+	fprintf(fp, "            bpf_ringbuf_map_rb: %ld\n", OFFSET(bpf_ringbuf_map_rb));
+	fprintf(fp, "      bpf_ringbuf_consumer_pos: %ld\n", OFFSET(bpf_ringbuf_consumer_pos));
+	fprintf(fp, "          bpf_ringbuf_nr_pages: %ld\n", OFFSET(bpf_ringbuf_nr_pages));
 
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
@@ -12148,6 +12237,7 @@ dump_offset_table(char *spec, ulong makestruct)
 
 	fprintf(fp, "                percpu_counter: %ld\n", SIZE(percpu_counter));
 	fprintf(fp, "                     cpumask_t: %ld\n", SIZE(cpumask_t));
+	fprintf(fp, "               bpf_ringbuf_map: %ld\n", SIZE(bpf_ringbuf_map));
 
         fprintf(fp, "\n                   array_table:\n");
 	/*

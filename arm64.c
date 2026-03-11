@@ -234,6 +234,8 @@ arm64_get_current_task_reg(int regno, const char *name,
 
 	BZERO(&bt_setup, sizeof(struct bt_info));
 	clone_bt_info(&bt_setup, &bt_info, tc);
+	if (bt_info.stackbase == 0)
+		return FALSE;
 	fill_stackbuf(&bt_info);
 
 	get_dumpfile_regs(&bt_info, &sp, &ip);
@@ -710,7 +712,16 @@ arm64_init(int when)
 			}
 		}
 
-		if (THIS_KERNEL_VERSION >= LINUX(5,19,0)) {
+		if (THIS_KERNEL_VERSION >= LINUX(6,10,0)) {
+			ms->__SWP_TYPE_BITS = 5;
+			ms->__SWP_TYPE_SHIFT = 6;
+			ms->__SWP_TYPE_MASK = ((1UL << ms->__SWP_TYPE_BITS) - 1);
+			ms->__SWP_OFFSET_SHIFT = 12;
+			ms->__SWP_OFFSET_BITS = 50;
+			ms->__SWP_OFFSET_MASK = ((1UL << ms->__SWP_OFFSET_BITS) - 1);
+			ms->PTE_PROT_NONE = 0; /* unused */
+			ms->PTE_FILE = 0;  /* unused */
+		} else if (THIS_KERNEL_VERSION >= LINUX(5,19,0)) {
 			ms->__SWP_TYPE_BITS = 5;
 			ms->__SWP_TYPE_SHIFT = 3;
 			ms->__SWP_TYPE_MASK = ((1UL << ms->__SWP_TYPE_BITS) - 1);

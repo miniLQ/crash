@@ -266,6 +266,12 @@ char *program_usage_info[] = {
     "    Display the OSRELEASE vmcoreinfo string from a kdump dumpfile",
     "    header.",
     "",
+    "  --build-id dumpfile",
+    "    Display the BUILD-ID vmcoreinfo string from a kdump dumpfile",
+    "    header.",
+    "    Note: this option only works for kernel(>=v5.9); otherwise it",
+    "    prints \"unknown\" and exits with non-zero status",
+    "",
     "  --hyper",
     "    Force the session to be that of a Xen hypervisor.",
     "",
@@ -343,6 +349,10 @@ char *program_usage_info[] = {
     "    between the symbol values compiled into the vmlinux file and their",
     "    relocated KASLR value.  If set to auto, the KASLR offset value will",
     "    be automatically calculated.",
+    "",
+    "  --max-malloc-bufs <size>",
+    "    Set the value of MAX_MALLOC_BUFS to size.",
+    "    The minimum allowed value is 3072.",
     "",
     "  --minimal",
     "    Bring up a session that is restricted to the log, dis, rd, sym,",
@@ -4026,7 +4036,7 @@ NULL
 char *help_log[] = {
 "log",
 "dump system message buffer",
-"[-Ttdmasc]",
+"[-TtdmascR]",
 "  This command dumps the kernel log_buf contents in chronological order.  The",
 "  command supports the older log_buf formats, which may or may not contain a",
 "  timestamp inserted prior to each message, as well as the newer variable-length", 
@@ -4053,6 +4063,8 @@ char *help_log[] = {
 "        the CPU id (if in CPU context) that called printk(), if available.",
 "        Generally available on Linux 5.1 to 5.9 kernels configured with",
 "        CONFIG_PRINTK_CALLER or Linux 5.10 and later kernels.",
+"    -R  Display the message text with human readable Rust symbol name if any,",
+"        otherwise still print the original message text.",
 " ",
 "\nEXAMPLES",
 "  Dump the kernel message buffer:\n",
@@ -4230,6 +4242,26 @@ char *help_log[] = {
 "    [    0.014179] [     T1] Secure boot disabled",
 "    [    0.014179] [    T29] RAMDISK: [mem 0x3cf4f000-0x437bbfff]",
 "    [    0.198789] [     C0] DMAR: DRHD: handling fault status reg 3",
+"    ...",
+" ",
+"  Display the message text with human readable Rust symbol name if any,",
+"  otherwise still print the original message text.\n",
+"    %s> log -R",
+"    ...",
+"    [ 2174.289360] Tainted: [S]=CPU_OUT_OF_SPEC, [O]=OOT_MODULE, [E]=UNSIGNED_MODULE",
+"    [ 2174.297322] Hardware name: Intel Corporation S2600CWR/S2600CWR, BIOS SE5C610.86B.01.01.0018.072020161249 07/20/2016",
+"    [ 2174.308966] Call Trace:",
+"    [ 2174.311693]  <TASK>",
+"    [ 2174.314033]  dump_stack_lvl+0x5d/0x80",
+"    [ 2174.318125]  panic+0x156/0x32a",
+"    [ 2174.321539]  rust_panic::area_in_hp+0xf7/0x120 [rust_panic]",
+"    [ 2174.329700]  ? console_unlock+0x9c/0x140",
+"    [ 2174.334080]  ? irq_work_queue+0x2d/0x50",
+"    [ 2174.338352]  ? __pfx_init_module+0x10/0x10 [rust_panic]",
+"    [ 2174.344183]  <rust_panic::HelloPanic>::step_two+0x20/0xe0 [rust_panic]",
+"    [ 2174.353698]  ? _printk+0x6b/0x90",
+"    [ 2174.357303]  init_module+0x57/0xff0 [rust_panic]",
+"    [ 2174.362456]  ? __pfx_init_module+0x10/0x10 [rust_panic]",
 "    ...",
 
 NULL               
@@ -8186,6 +8218,16 @@ char *help_net[] = {
 NULL               
 };
 
+char *help_rustfilt[] = {
+"rustfilt",
+"demangle a mangled Rust symbol to human readable symbol",
+"<symbol>",
+"  This command converts a mangled Rust symbol to human readable symbol.",
+"\nEXAMPLES",
+"  crash> rustfilt _RNvNtCshc5sK6KjdJJ_6kernel5print11call_printk",
+"  kernel::print::call_printk",
+NULL
+};
 
 char *help_waitq[] = {
 "waitq",

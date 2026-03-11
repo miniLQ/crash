@@ -43,6 +43,7 @@ static void display_bh_1(void);
 static void display_bh_2(void);
 static void display_bh_3(void);
 static void display_bh_4(void);
+static int hrtimer_base_type_init(void);
 static void dump_hrtimer_data(const ulong *cpus);
 static void dump_hrtimer_clock_base(const void *, const int);
 static void dump_hrtimer_base(const void *, const int);
@@ -99,7 +100,6 @@ static ulong dump_audit_skb_queue(ulong);
 static ulong __dump_audit(char *);
 static void dump_audit(void);
 static void dump_printk_safe_seq_buf(int);
-static char *vmcoreinfo_read_string(const char *);
 static void check_vmcoreinfo(void);
 static int is_pvops_xen(void);
 static int get_linux_banner_from_vmlinux(char *, size_t);
@@ -463,6 +463,11 @@ kernel_init()
 		    "list_head.next offset: %ld: list command may fail\n",
 			OFFSET(list_head_next));
 
+	if (STRUCT_EXISTS("klp_patch")) {
+		if (MEMBER_EXISTS("klp_patch", "list"))
+			MEMBER_OFFSET_INIT(klp_patch_list, "klp_patch", "list");
+	}
+
         MEMBER_OFFSET_INIT(hlist_node_next, "hlist_node", "next");
         MEMBER_OFFSET_INIT(hlist_node_pprev, "hlist_node", "pprev");
 	STRUCT_SIZE_INIT(hlist_head, "hlist_head"); 
@@ -797,6 +802,12 @@ kernel_init()
 			"hrtimer_clock_base", "first");
 		MEMBER_OFFSET_INIT(hrtimer_clock_base_get_time, 
 			"hrtimer_clock_base", "get_time");
+		if (INVALID_MEMBER(hrtimer_clock_base_get_time)) {
+			/* Linux 6.18: 009eb5da29a9 */
+			MEMBER_OFFSET_INIT(hrtimer_clock_base_index, "hrtimer_clock_base", "index");
+			if (!hrtimer_base_type_init())
+				error(WARNING, "cannot get enum hrtimer_base_type\n");
+		}
 	}
 
 	STRUCT_SIZE_INIT(hrtimer_base, "hrtimer_base");
@@ -5136,7 +5147,7 @@ cmd_log(void)
 
 	msg_flags = 0;
 
-        while ((c = getopt(argcnt, args, "Ttdmasc")) != EOF) {
+        while ((c = getopt(argcnt, args, "TtdmascR")) != EOF) {
                 switch(c)
                 {
 		case 'T':
@@ -5159,6 +5170,9 @@ cmd_log(void)
 			break;
 		case 'c':
 			msg_flags |= SHOW_LOG_CALLER;
+			break;
+		case 'R':
+			msg_flags |= SHOW_LOG_RUST;
 			break;
                 default:
                         argerrs++;
@@ -5679,6 +5693,70 @@ is_livepatch(void)
 	return FALSE;
 }
 
+struct klp_transition_ctx {
+	ulong transition_patch;
+	int found;
+};
+
+static int
+klp_transition_match(void *entry, void *data)
+{
+	struct klp_transition_ctx *ctx = data;
+
+	if ((ulong)entry == ctx->transition_patch) {
+		ctx->found = TRUE;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static int
+is_livepatch_transition(void)
+{
+	struct kernel_list_head head;
+	struct list_data ld;
+	struct klp_transition_ctx ctx;
+	ulong transition_patch;
+	ulong list_addr;
+	int ret;
+
+	if (!try_get_symbol_data("klp_transition_patch",
+	    sizeof(ulong), &transition_patch) || !transition_patch)
+		return FALSE;
+
+	if (!STRUCT_EXISTS("klp_patch") || !VALID_MEMBER(klp_patch_list) ||
+	    !kernel_symbol_exists("klp_patches"))
+		return TRUE;
+
+	list_addr = symbol_value("klp_patches");
+	if (!readmem(list_addr, KVADDR, &head, sizeof(head), "klp_patches",
+	    RETURN_ON_ERROR | QUIET))
+		return TRUE;
+
+	if (!head.next || head.next == (void *)list_addr)
+		return TRUE;
+
+	BZERO(&ctx, sizeof(ctx));
+	ctx.transition_patch = transition_patch;
+
+	BZERO(&ld, sizeof(ld));
+	ld.flags = LIST_CALLBACK|CALLBACK_RETURN|RETURN_ON_LIST_ERROR|
+	    RETURN_ON_DUPLICATE|LIST_ALLOCATE;
+	ld.start = (ulong)head.next;
+	ld.end = list_addr;
+	ld.member_offset = OFFSET(list_head_next);
+	ld.list_head_offset = OFFSET(klp_patch_list);
+	ld.callback_func = klp_transition_match;
+	ld.callback_data = &ctx;
+
+	ret = do_list(&ld);
+	if (ret < 0)
+		return FALSE;
+
+	return ctx.found;
+}
+
 /*
  *  Display system stats at init-time or for the sys command.
  */
@@ -5722,17 +5800,19 @@ display_sys_stats(void)
 		}
 	} else {
         	if (pc->system_map) {
-			fprintf(fp, "  SYSTEM MAP: %s%s%s\n", pc->system_map,
+			fprintf(fp, "  SYSTEM MAP: %s%s%s%s\n", pc->system_map,
 				is_livepatch() ? "  [LIVEPATCH]" : "",
+				is_livepatch_transition() ? "  [TRANSITION]" : "",
 				is_kernel_tainted() ? "  [TAINTED]" : "");
 			fprintf(fp, "DEBUG KERNEL: %s %s\n", 
 					pc->namelist_orig ?
 					pc->namelist_orig : pc->namelist,
 					debug_kernel_version(pc->namelist));
 		} else
-			fprintf(fp, "      KERNEL: %s%s%s\n", pc->namelist_orig ?
+			fprintf(fp, "      KERNEL: %s%s%s%s\n", pc->namelist_orig ?
 				pc->namelist_orig : pc->namelist,
 				is_livepatch() ? "  [LIVEPATCH]" : "",
+				is_livepatch_transition() ? "  [TRANSITION]" : "",
 				is_kernel_tainted() ? "  [TAINTED]" : "");
 	}
 
@@ -7936,6 +8016,52 @@ static int expires_len = -1;
 static int softexpires_len = -1;
 static int tte_len = -1;
 
+static char **hrtimer_base_type = NULL;
+static int
+hrtimer_base_type_init(void)
+{
+	long max_bases;
+	int i, c ATTRIBUTE_UNUSED;
+	char buf[BUFSIZE];
+	char *arglist[MAXARGS];
+
+	if (!enumerator_value("HRTIMER_MAX_CLOCK_BASES", &max_bases))
+		return FALSE;
+
+	hrtimer_base_type = (char **)calloc(max_bases, sizeof(char *));
+	if (!hrtimer_base_type)
+		return FALSE;
+
+	pc->flags2 |= ALLOW_FP; /* Required during initialization */
+	open_tmpfile();
+	if (dump_enumerator_list("hrtimer_base_type")) {
+		rewind(pc->tmpfile);
+		while (fgets(buf, BUFSIZE, pc->tmpfile)) {
+			if (!strstr(buf, " = "))
+				continue;
+			c = parse_line(buf, arglist);
+			i = atoi(arglist[2]);
+			if (0 <= i && i < max_bases)
+				hrtimer_base_type[i] = strdup(arglist[0]);
+		}
+		close_tmpfile();
+		pc->flags2 &= ~ALLOW_FP;
+	} else {
+		close_tmpfile();
+		pc->flags2 &= ~ALLOW_FP;
+		free(hrtimer_base_type);
+		hrtimer_base_type = NULL;
+		return FALSE;
+	}
+
+	if (CRASHDEBUG(1)) {
+		for (i = 0; i < max_bases; i++)
+			fprintf(fp, "hrtimer_base_type[%d] = %s\n", i, hrtimer_base_type[i]);
+	}
+
+	return TRUE;
+}
+
 static void
 dump_hrtimer_clock_base(const void *hrtimer_bases, const int num)
 {
@@ -7947,11 +8073,23 @@ dump_hrtimer_clock_base(const void *hrtimer_bases, const int num)
 
 	base = (void *)hrtimer_bases + OFFSET(hrtimer_cpu_base_clock_base) +
 		SIZE(hrtimer_clock_base) * num;
-	readmem((ulong)(base + OFFSET(hrtimer_clock_base_get_time)), KVADDR,
-		&get_time, sizeof(get_time), "hrtimer_clock_base get_time",
-		FAULT_ON_ERROR);
-	fprintf(fp, "  CLOCK: %d  HRTIMER_CLOCK_BASE: %lx  [%s]\n", num, 
-		(ulong)base, value_to_symstr(get_time, buf, 0));
+
+	if (INVALID_MEMBER(hrtimer_clock_base_get_time)) {
+		/* Linux 6.18: 009eb5da29a9 */
+		if (hrtimer_base_type) {
+			uint index;
+			readmem((ulong)(base + OFFSET(hrtimer_clock_base_index)), KVADDR, &index,
+				sizeof(index), "hrtimer_clock_base index", FAULT_ON_ERROR);
+			fprintf(fp, "  CLOCK: %d  HRTIMER_CLOCK_BASE: %lx  [%s]\n", num,
+				(ulong)base, hrtimer_base_type[index]);
+		} else
+			fprintf(fp, "  CLOCK: %d  HRTIMER_CLOCK_BASE: %lx\n", num, (ulong)base);
+	} else {
+		readmem((ulong)(base + OFFSET(hrtimer_clock_base_get_time)), KVADDR, &get_time,
+			sizeof(get_time), "hrtimer_clock_base get_time", FAULT_ON_ERROR);
+		fprintf(fp, "  CLOCK: %d  HRTIMER_CLOCK_BASE: %lx  [%s]\n", num,
+			(ulong)base, value_to_symstr(get_time, buf, 0));
+	}
 
 	/* get current time(uptime) */
 	get_uptime(NULL, &current_time);
@@ -11892,8 +12030,8 @@ dump_printk_safe_seq_buf(int msg_flags)
  * Returns a string (that has to be freed by the caller) that contains the
  * value for key or NULL if the key has not been found.
  */
-static char *
-vmcoreinfo_read_string(const char *key)
+char *
+vmcoreinfo_read_from_memory(const char *key)
 {
 	char *buf, *value_string, *p1, *p2;
 	size_t value_length;
@@ -11902,6 +12040,14 @@ vmcoreinfo_read_string(const char *key)
 	char keybuf[BUFSIZE];
 
 	buf = value_string = NULL;
+
+	if (!(pc->flags & GDB_INIT)) {
+		/*
+		 * GDB interface hasn't been initialised yet, so can't
+		 * access vmcoreinfo_data
+		 */
+		return NULL;
+	}
 
 	switch (get_symbol_type("vmcoreinfo_data", NULL, NULL))
 	{
@@ -11958,10 +12104,10 @@ check_vmcoreinfo(void)
 		switch (get_symbol_type("vmcoreinfo_data", NULL, NULL))
 		{
 		case TYPE_CODE_PTR:
-			pc->read_vmcoreinfo = vmcoreinfo_read_string;
+			pc->read_vmcoreinfo = vmcoreinfo_read_from_memory;
 			break;
 		case TYPE_CODE_ARRAY:
-			pc->read_vmcoreinfo = vmcoreinfo_read_string;
+			pc->read_vmcoreinfo = vmcoreinfo_read_from_memory;
 			break;
 		}
 	}
