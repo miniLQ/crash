@@ -11,8 +11,8 @@ jobs:
     strategy:
       matrix:
         arch:
-        - x86_64
- #       - aarch64
+ #       - x86_64
+        - aarch64
  #       - s390x
  #       - powerpc64
  #       - x86
