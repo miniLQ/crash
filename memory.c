@@ -301,7 +301,7 @@ static int dump_vm_event_state(void);
 static int dump_page_states(void);
 static int generic_read_dumpfile(ulonglong, void *, long, char *, ulong);
 static int generic_write_dumpfile(ulonglong, void *, long, char *, ulong);
-static int page_to_nid(ulong);
+int page_to_nid(ulong);
 static int get_kmem_cache_list(ulong **);
 static int get_kmem_cache_root_list(ulong **);
 static int get_kmem_cache_child_list(ulong **, ulong);
@@ -410,6 +410,10 @@ mem_init(void)
         DISPLAY_DEFAULT = (sizeof(long) == 8) ? DISPLAY_64 : DISPLAY_32;
 }
 
+#define FOLIO_ORDER_V1	1
+#define FOLIO_ORDER_V2	2
+#define FOLIO_ORDER_V3	3
+static int folio_order_version;
 
 /*
  *  Stash a few popular offsets and some basic kernel virtual memory
@@ -546,6 +550,37 @@ vm_init(void)
 	MEMBER_OFFSET_INIT(page_private, "page", "private");
 	MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
 	MEMBER_OFFSET_INIT(page_page_type, "page", "page_type");
+
+	/*
+	 * The "folio_batch" was introduced at patch set:
+	 * https://lore.kernel.org/all/20211208042256.1923824-1-willy@infradead.org/
+	 * Use it as the indicator for folio_order() version 1.
+	 */
+	if (STRUCT_EXISTS("folio_batch"))
+		folio_order_version = FOLIO_ORDER_V1;
+
+	MEMBER_OFFSET_INIT(page_compound_order, "page", "compound_order");
+	MEMBER_SIZE_INIT(page_compound_order, "page", "compound_order");
+
+	/*
+	 * The "_folio_order" was introduced at patch set:
+	 * https://lore.kernel.org/all/20220808193430.3378317-1-willy@infradead.org/
+	 * Use it as the indicator for folio_order() version 2.
+	 */
+	MEMBER_SIZE_INIT(folio__folio_order, "folio", "_folio_order");
+	MEMBER_OFFSET_INIT(folio__folio_order, "folio", "_folio_order");
+	if (VALID_MEMBER(folio__folio_order))
+		folio_order_version = FOLIO_ORDER_V2;
+
+	/*
+	 * The "free_huge_folio()" was introduced at patch set:
+	 * https://lore.kernel.org/linux-mm/20230816151201.3655946-1-willy@infradead.org/
+	 * Use it as the indicator for folio_order() version 3.
+	 */
+	MEMBER_OFFSET_INIT(folio__flags_1, "folio", "_flags_1");
+	MEMBER_SIZE_INIT(folio__flags_1, "folio", "_flags_1");
+	if (kernel_symbol_exists("free_huge_folio"))
+		folio_order_version = FOLIO_ORDER_V3;
 
 	MEMBER_OFFSET_INIT(mm_struct_pgd, "mm_struct", "pgd");
 
@@ -8836,7 +8871,8 @@ dump_kmeminfo(struct meminfo *mi)
          *  get swap data from dump_swap_info().
          */
 	fprintf(fp, "\n");
-	if (symbol_exists("swapper_space") || symbol_exists("swapper_spaces")) {
+	if (symbol_exists("swap_info") ||
+	    symbol_exists("swapper_space") || symbol_exists("swapper_spaces")) {
 		if (dump_swap_info(RETURN_ON_ERROR, &totalswap_pages, 
 		    &totalused_pages)) {
 			fprintf(fp, "%13s  %7ld  %11s         ----\n", 
@@ -16254,9 +16290,6 @@ dump_swap_info(ulong swapflags, ulong *totalswap_pages, ulong *totalused_pages)
 					OFFSET(swap_info_struct_inuse_pages));
 		}
 
-		swap_map = ULONG(vt->swap_info_struct +
-			OFFSET(swap_info_struct_swap_map));
-
 		if (swap_file) {
 			if (VALID_MEMBER(swap_info_struct_swap_vfsmnt)) {
                 		vfsmnt = ULONG(vt->swap_info_struct +
@@ -16285,6 +16318,9 @@ dump_swap_info(ulong swapflags, ulong *totalswap_pages, ulong *totalused_pages)
 		smap = NULL;
 		if (vt->flags & SWAPINFO_V1) {
 			smap = (ushort *)GETBUF(sizeof(ushort) * max);
+
+			swap_map = ULONG(vt->swap_info_struct +
+				OFFSET(swap_info_struct_swap_map));
 
 			if (!readmem(swap_map, KVADDR, smap, 
 			    sizeof(ushort) * max, "swap_info swap_map data",
@@ -20058,7 +20094,7 @@ is_kmem_cache_addr_common(ulong vaddr, char *kbuf)
 /*
  *  Kernel-config-neutral page-to-node evaluator.
  */
-static int 
+int
 page_to_nid(ulong page)
 {
         int i;
@@ -20424,6 +20460,50 @@ static unsigned int oo_order(ulong oo)
 static unsigned int oo_objects(ulong oo)
 {
         return (oo & ((1 << 16) - 1));
+}
+
+int
+folio_order(ulong folio)
+{
+	ulong v = 0;
+	int PG_head = 16;
+
+	if (folio_order_version == FOLIO_ORDER_V1) {
+		readmem(folio + OFFSET(page_flags), KVADDR, &v, sizeof(ulong),
+				"folio.page.flags", FAULT_ON_ERROR);
+		if (!(v & (1 << PG_head)))
+			return 0;
+
+		readmem(folio + SIZE(page) + OFFSET(page_compound_order), KVADDR, &v,
+			SIZE(page_compound_order), "page[1].compound_order", FAULT_ON_ERROR);
+
+		return v;
+	} else if (folio_order_version == FOLIO_ORDER_V2) {
+		readmem(folio + OFFSET(page_flags), KVADDR, &v, sizeof(ulong),
+				"folio.page.flags", FAULT_ON_ERROR);
+		if (!(v & (1 << PG_head)))
+			return 0;
+
+		readmem(folio + OFFSET(folio__folio_order), KVADDR, &v,
+			SIZE(folio__folio_order), "folio->_folio_order", FAULT_ON_ERROR);
+
+		return v;
+	} else if (folio_order_version == FOLIO_ORDER_V3) {
+		/* The PG_head changes to bit 6 in this version */
+		PG_head = 6;
+
+		readmem(folio + OFFSET(page_flags), KVADDR, &v, sizeof(ulong),
+				"folio.page.flags", FAULT_ON_ERROR);
+		if (!(v & (1 << PG_head)))
+			return 0;
+
+		readmem(folio + OFFSET(folio__flags_1), KVADDR, &v,
+			SIZE(folio__flags_1), "folio->_flags_1", FAULT_ON_ERROR);
+
+		return v & 0xff;
+	} else {
+		return 0;
+	}
 }
 
 #ifdef NOT_USED

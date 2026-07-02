@@ -2290,6 +2290,10 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long bpf_ringbuf_nr_pages;
 	long hrtimer_clock_base_index;
 	long klp_patch_list;
+	long tk_data_timekeeper;
+	long page_compound_order;
+	long folio__folio_order;
+	long folio__flags_1;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -2469,6 +2473,9 @@ struct size_table {         /* stash of commonly-used sizes */
 	long cpumask_t;
 	long task_struct_exit_state;
 	long bpf_ringbuf_map;
+	long page_compound_order;
+	long folio__folio_order;
+	long folio__flags_1;
 };
 
 struct array_table {
@@ -2900,7 +2907,7 @@ struct downsized {
 #define SYMVAL_HASH_INDEX(vaddr) \
         (((vaddr) >> machdep->pageshift) % SYMVAL_HASH)
 
-#define SYMNAME_HASH (512)
+#define SYMNAME_HASH (16384)
 
 #define PATCH_KERNEL_SYMBOLS_START  ((char *)(1))
 #define PATCH_KERNEL_SYMBOLS_STOP   ((char *)(2))
@@ -3803,16 +3810,8 @@ typedef signed int s32;
 /*
  * Direct memory mapping
  */
-#define PTOV(X) 									\
-	(((unsigned long)(X)+(machdep->kvbase)) - machdep->machspec->phys_base)
-#define VTOP(X) ({									\
-	ulong _X = X;									\
-	(THIS_KERNEL_VERSION >= LINUX(5,13,0) &&					\
-		(_X) >= machdep->machspec->kernel_link_addr) ?				\
-		((unsigned long)(_X)-(machdep->machspec->va_kernel_pa_offset)): 	\
-		(((unsigned long)(_X)-(machdep->kvbase)) +				\
-		 machdep->machspec->phys_base);						\
-	})
+#define PTOV(X) riscv64_PTOV((ulong)(X))
+#define VTOP(X)	riscv64_VTOP((ulong)(X))
 #define PAGEBASE(X)		(((ulong)(X)) & (ulong)machdep->pagemask)
 
 /*
@@ -5690,6 +5689,9 @@ int do_radix_tree_traverse(ulong ptr, int is_root, struct radix_tree_ops *ops);
 struct xarray_ops {
 	void (*entry)(ulong node, ulong slot, const char *path,
 		      ulong index, void *private);
+	uint (*update_off)(ulong node, uint height, char *path, ulong index,
+                      ulong slot, uint off, ulong shift, struct xarray_ops *ops,
+		      bool *should_continue);
 	uint radix;
 	void *private;
 };
@@ -5805,6 +5807,7 @@ struct syment *prev_symbol(char *, struct syment *);
 void get_symbol_data(char *, long, void *);
 int try_get_symbol_data(char *, long, void *);
 char *value_to_symstr(ulong, char *, ulong);
+char *value_to_symstr_trace(ulong, char *, ulong);
 char *value_symbol(ulong);
 ulong symbol_value(char *);
 ulong symbol_value_module(char *, char *);
@@ -5946,6 +5949,7 @@ int dump_inode_page(ulong);
 ulong valid_section_nr(ulong);
 void display_memory_from_file_offset(ulonglong, long, void *);
 void swap_info_init(void);
+int page_to_nid(ulong);
 
 /*
  *  filesys.c 
@@ -6004,6 +6008,10 @@ ulong do_xarray(ulong, int, struct list_pair *);
 #define XARRAY_DUMP_CB (5)
 #define XARRAY_TAG_MASK      (3UL)
 #define XARRAY_TAG_INTERNAL  (2UL)
+#define XARRAY_TYPE_PAGE_CACHE	0x8
+extern ulong XA_CHUNK_SHIFT;
+
+int folio_order(ulong folio);
 
 int file_dump(ulong, ulong, ulong, int, int);
 #define DUMP_FULL_NAME      0x1
@@ -6642,6 +6650,8 @@ struct ORC_data {
 	orc_entry orc_entry_data;
 	int has_signal;
 	int has_end;
+	int reg_sp;
+	int reg_prev_sp;
 };
 
 #define ORC_TYPE_CALL                   ((machdep->flags & ORC_6_4) ? 2 : 0)
@@ -6652,11 +6662,11 @@ struct ORC_data {
 #define UNWIND_HINT_TYPE_RESTORE        4
 
 #define ORC_REG_UNDEFINED               0
-#define ORC_REG_PREV_SP                 1
+#define ORC_REG_PREV_SP                 (machdep->machspec->orc.reg_prev_sp)
 #define ORC_REG_DX                      2
 #define ORC_REG_DI                      3
 #define ORC_REG_BP                      4
-#define ORC_REG_SP                      5
+#define ORC_REG_SP                      (machdep->machspec->orc.reg_sp)
 #define ORC_REG_R10                     6
 #define ORC_REG_R13                     7
 #define ORC_REG_BP_INDIRECT             8
@@ -7211,6 +7221,8 @@ void riscv64_display_regs_from_elf_notes(int, FILE *);
 void riscv64_init(int);
 void riscv64_dump_machdep_table(ulong);
 int riscv64_IS_VMALLOC_ADDR(ulong);
+ulong riscv64_PTOV(ulong);
+ulong riscv64_VTOP(ulong);
 
 #define display_idt_table() \
 	error(FATAL, "-d option is not applicable to RISCV64 architecture\n")

@@ -18,20 +18,23 @@
 #include <elf.h>
 #include "defs.h"
 
-/* from arch/loongarch/include/asm/ptrace.h */
+/*
+ * This matches the beginning of both kernel struct pt_regs and the
+ * elf_gregset_t layout exported in NT_PRSTATUS notes.
+ */
 struct loongarch64_pt_regs {
 	/* Saved main processor registers. */
 	unsigned long regs[32];
 
 	/* Saved special registers. */
+	unsigned long orig_a0;
+	unsigned long csr_epc;
+	unsigned long csr_badvaddr;
 	unsigned long csr_crmd;
 	unsigned long csr_prmd;
 	unsigned long csr_euen;
 	unsigned long csr_ecfg;
 	unsigned long csr_estat;
-	unsigned long csr_epc;
-	unsigned long csr_badvaddr;
-	unsigned long orig_a0;
 };
 
 struct loongarch64_unwind_frame {
@@ -61,6 +64,7 @@ static void loongarch64_dump_backtrace_entry(struct bt_info *bt,
 			struct loongarch64_unwind_frame *previous, int level);
 static void loongarch64_dump_exception_stack(struct bt_info *bt, char *pt_regs);
 static int loongarch64_is_exception_entry(struct syment *sym);
+static int loongarch64_eframe_search(struct bt_info *bt);
 static void loongarch64_display_full_frame(struct bt_info *bt,
 			struct loongarch64_unwind_frame *current,
 			struct loongarch64_unwind_frame *previous);
@@ -108,13 +112,14 @@ typedef struct { ulong pte; } pte_t;
 #define LOONGARCH64_EF_RA		1
 #define LOONGARCH64_EF_SP		3
 #define LOONGARCH64_EF_FP		22
-#define LOONGARCH64_EF_CSR_EPC		32
-#define LOONGARCH64_EF_CSR_BADVADDR	33
-#define LOONGARCH64_EF_CSR_CRMD		34
-#define LOONGARCH64_EF_CSR_PRMD		35
-#define LOONGARCH64_EF_CSR_EUEN		36
-#define LOONGARCH64_EF_CSR_ECFG		37
-#define LOONGARCH64_EF_CSR_ESTAT	38
+#define LOONGARCH64_EF_ORIG_A0		32
+#define LOONGARCH64_EF_CSR_EPC		33
+#define LOONGARCH64_EF_CSR_BADVADDR	34
+#define LOONGARCH64_EF_CSR_CRMD		35
+#define LOONGARCH64_EF_CSR_PRMD		36
+#define LOONGARCH64_EF_CSR_EUEN		37
+#define LOONGARCH64_EF_CSR_ECFG		38
+#define LOONGARCH64_EF_CSR_ESTAT	39
 
 static struct machine_specific loongarch64_machine_specific = { 0 };
 
@@ -457,7 +462,7 @@ loongarch64_back_trace_cmd(struct bt_info *bt)
 		previous.pc = current.ra = regs->regs[LOONGARCH64_EF_RA];
 	}
 
-	while (current.sp <= bt->stacktop - 32 - SIZE(pt_regs)) {
+	while (current.sp <= bt->stacktop - SIZE(pt_regs)) {
 		struct syment *symbol = NULL;
 		ulong offset;
 
@@ -497,7 +502,7 @@ loongarch64_back_trace_cmd(struct bt_info *bt)
 		 *    * ret_from_kernel_thread
 		 */
 		if (symbol && !STRNEQ(symbol->name, "ret_from") && !offset &&
-			!current.ra && current.sp < bt->stacktop - 32 - SIZE(pt_regs)) {
+			!current.ra && current.sp < bt->stacktop - SIZE(pt_regs)) {
 			if (CRASHDEBUG(8))
 				fprintf(fp, "zero offset at %s, try previous symbol\n",
 					symbol->name);
@@ -703,7 +708,31 @@ loongarch64_is_exception_entry(struct syment *sym)
 	return STREQ(sym->name, "ret_from_exception") ||
 		STREQ(sym->name, "ret_from_irq") ||
 		STREQ(sym->name, "work_resched") ||
-		STREQ(sym->name, "handle_sys");
+		STREQ(sym->name, "handle_sys") ||
+		STREQ(sym->name, "handle_syscall") ||
+		STREQ(sym->name, "handle_ade") ||
+		STREQ(sym->name, "handle_ale") ||
+		STREQ(sym->name, "handle_bce") ||
+		STREQ(sym->name, "handle_bp") ||
+		STREQ(sym->name, "handle_fpe") ||
+		STREQ(sym->name, "handle_fpu") ||
+		STREQ(sym->name, "handle_iasub") ||
+		STREQ(sym->name, "handle_ib") ||
+		STREQ(sym->name, "handle_int") ||
+		STREQ(sym->name, "handle_ipe") ||
+		STREQ(sym->name, "handle_lbt") ||
+		STREQ(sym->name, "handle_lsx") ||
+		STREQ(sym->name, "handle_mcheck") ||
+		STREQ(sym->name, "handle_oac") ||
+		STREQ(sym->name, "handle_parchk") ||
+		STREQ(sym->name, "handle_reserved") ||
+		STREQ(sym->name, "handle_ri") ||
+		STREQ(sym->name, "handle_tlb_protect") ||
+		STREQ(sym->name, "tlb_do_page_fault_0") ||
+		STREQ(sym->name, "tlb_do_page_fault_1") ||
+		STREQ(sym->name, "handle_vint") ||
+		STREQ(sym->name, "handle_watch") ||
+		STREQ(sym->name, "handle_lasx");
 }
 
 /*
@@ -757,6 +786,8 @@ loongarch64_stackframe_init(void)
 
 	ASSIGN_OFFSET(task_struct_thread_reg03) =
 		task_struct_thread + thread_reg03_sp;
+	MEMBER_OFFSET_INIT(pt_regs_regs, "pt_regs", "regs");
+	STRUCT_SIZE_INIT(pt_regs, "pt_regs");
 	ASSIGN_OFFSET(task_struct_thread_reg01) =
 		task_struct_thread + thread_reg01_ra;
 
@@ -911,8 +942,12 @@ loongarch64_get_crash_notes(void)
 		/*
 		 * Add __per_cpu_offset for each cpu to form the pointer to the notes
 		 */
-		for (i = 0; i < kt->cpus; i++)
-			notes_ptrs[i] = notes_ptrs[kt->cpus-1] + kt->__per_cpu_offset[i];
+		for (i = 0; i < kt->cpus; i++) {
+			if (IS_KVADDR(notes_ptrs[kt->cpus-1]))
+				notes_ptrs[i] = notes_ptrs[kt->cpus-1] + kt->__per_cpu_offset[i];
+			else
+				notes_ptrs[i] = crash_notes + kt->__per_cpu_offset[i];
+		}
 	}
 
 	buf = GETBUF(SIZE(note_buf));
@@ -1009,7 +1044,7 @@ loongarch64_get_elf_notes(void)
 	struct machine_specific *ms = machdep->machspec;
 	int i;
 
-	if (!DISKDUMP_DUMPFILE() && !KDUMP_DUMPFILE())
+	if (!DISKDUMP_DUMPFILE() && !KDUMP_DUMPFILE() && !NETDUMP_DUMPFILE())
 		return FALSE;
 
 	panic_task_regs = calloc(kt->cpus, sizeof(*panic_task_regs));
@@ -1022,7 +1057,7 @@ loongarch64_get_elf_notes(void)
 
 		if (DISKDUMP_DUMPFILE())
 			note = diskdump_get_prstatus_percpu(i);
-		else if (KDUMP_DUMPFILE())
+		else if (KDUMP_DUMPFILE() || NETDUMP_DUMPFILE())
 			note = netdump_get_prstatus_percpu(i);
 
 		if (!note) {
@@ -1233,6 +1268,7 @@ loongarch64_init(int when)
 		machdep->kvtop = loongarch64_kvtop;
 		machdep->cmd_mach = loongarch64_cmd_mach;
 		machdep->back_trace = loongarch64_back_trace_cmd;
+		machdep->eframe_search = loongarch64_eframe_search;
 		machdep->get_stack_frame = loongarch64_get_stack_frame;
 		machdep->vmalloc_start = loongarch64_vmalloc_start;
 		machdep->processor_speed = loongarch64_processor_speed;
@@ -1353,6 +1389,12 @@ loongarch64_display_regs_from_elf_notes(int cpu, FILE *ofp)
 		regs->csr_ecfg,
 		regs->csr_estat,
 		regs->csr_euen);
+}
+
+static int
+loongarch64_eframe_search(struct bt_info *bt)
+{
+	return error(FATAL, "-e option not supported on this architecture\n");
 }
 
 #else /* !LOONGARCH64 */

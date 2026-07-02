@@ -209,15 +209,23 @@ riscv64_cmd_mach(void)
 static int
 riscv64_verify_symbol(const char *name, ulong value, char type)
 {
-	if (CRASHDEBUG(8) && name && strlen(name))
+	if (!name || !strlen(name))
+		return FALSE;
+
+	if (CRASHDEBUG(8))
 		fprintf(fp, "%08lx %s\n", value, name);
+
+	/* Filter out mapping symbols */
+	if ((name[0] == '.' && name[1] == 'L') ||
+	    (name[0] == 'L' && name[1] == '0') ||
+	    (name[0] == '$'))
+		return FALSE;
 
 	if (!(machdep->flags & KSYMS_START)) {
 		if (STREQ(name, "_text") || STREQ(name, "_stext"))
 			machdep->flags |= KSYMS_START;
 
-		return (name && strlen(name) && !STRNEQ(name, "__func__.") &&
-			!STRNEQ(name, "__crc_"));
+		return (!STRNEQ(name, "__func__.") && !STRNEQ(name, "__crc_"));
 	}
 
 	return TRUE;
@@ -1241,7 +1249,7 @@ riscv64_vtop_4level_4k(ulong *pgd, ulong vaddr, physaddr_t *paddr, int verbose)
 
 	/* PMD */
 	FILL_PMD(PAGEBASE(pmd_base), PHYSADDR, PAGESIZE());
-	pmd_addr = pmd_base + sizeof(pmd_t) + pmd_index_l4_4k(vaddr);
+	pmd_addr = pmd_base + sizeof(pmd_t) * pmd_index_l4_4k(vaddr);
 	pmd_val = ULONG(machdep->pmd + PAGEOFFSET(pmd_addr));
 	if (verbose)
 		fprintf(fp, "  PMD: %016lx => %016lx\n", pmd_addr, pmd_val);
@@ -1604,6 +1612,30 @@ riscv64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verb
 	default:
 		return FALSE;
 	}
+}
+
+ulong riscv64_PTOV(ulong paddr)
+{
+	ulong vaddr;
+	ulong offset = paddr - machdep->machspec->phys_base;
+
+	vaddr = offset + machdep->kvbase;
+
+	return vaddr;
+}
+
+ulong
+riscv64_VTOP(ulong addr)
+{
+	ulong paddr;
+
+	if ( (THIS_KERNEL_VERSION >= LINUX(5,13,0)) &&
+			(addr >= machdep->machspec->kernel_link_addr))
+		paddr = (addr - (machdep->machspec->va_kernel_pa_offset));
+	else
+		paddr = (addr - (ulong)machdep->kvbase + machdep->machspec->phys_base);
+
+	return paddr;
 }
 
 static int

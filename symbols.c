@@ -104,6 +104,7 @@ static void free_structure(struct struct_elem *);
 static unsigned char is_right_brace(const char *);
 static struct struct_elem *find_node(struct struct_elem *, char *);
 static void dump_node(struct struct_elem *, char *, unsigned char, unsigned char);
+static char *_value_to_symstr(ulong value, char *buf, ulong radix, int trace);
 
 static int module_mem_type(ulong, struct load_module *);
 static ulong module_mem_end(ulong, struct load_module *);
@@ -1170,16 +1171,19 @@ symname_hash_init(void)
 static unsigned int
 symname_hash_index(char *name)
 {
-	unsigned int len, value;
-	unsigned char *array = (unsigned char *)name;
+	unsigned int hash = 2166136261U;
+	unsigned char *p = (unsigned char *)name;
 
-	len = strlen(name);
-	if (!len)
+	if (!*p)
 		error(FATAL, "The length of the symbol name is zero!\n");
 
-	value = array[len - 1] * array[len / 2];
+	/* FNV-1a hash algorithm for better distribution */
+	while (*p) {
+		hash ^= *p++;
+		hash *= 16777619;
+	}
 
-	return (array[0] ^ value) % SYMNAME_HASH;
+	return hash % SYMNAME_HASH;
 }
 
 /*
@@ -1976,9 +1980,14 @@ store_module_symbols_6_4(ulong total, int mods_installed)
 			"module buffer", FAULT_ON_ERROR);
 
 		syms = ULONG(modbuf + OFFSET(module_syms));
-		gpl_syms = ULONG(modbuf + OFFSET(module_gpl_syms));
 		nsyms = UINT(modbuf + OFFSET(module_num_syms));
-		ngplsyms = UINT(modbuf + OFFSET(module_num_gpl_syms));
+		if (VALID_MEMBER(module_gpl_syms)) {
+			gpl_syms = ULONG(modbuf + OFFSET(module_gpl_syms));
+			ngplsyms = UINT(modbuf + OFFSET(module_num_gpl_syms));
+		} else {
+			gpl_syms = 0;
+			ngplsyms = 0;
+		}
 
 		nksyms = UINT(modbuf + OFFSET(module_num_symtab));
 
@@ -2987,9 +2996,12 @@ store_module_kallsyms_v2(struct load_module *lm, int start, int curr,
 		 * or '$x' for ARM64, and '$d'.
 		 * On LoongArch we have linker mapping symbols like '.L'
 		 * or 'L0'.
+		 * On RISCV64 we have linker mapping symbols like '.L',
+		 * 'L0' or '$'.
 		 * Make sure that these don't end up into our symbol list.
 		 */
-		if ((machine_type("ARM") || machine_type("ARM64") || machine_type("LOONGARCH64")) &&
+		if ((machine_type("ARM") || machine_type("ARM64") || machine_type("LOONGARCH64") ||
+		     machine_type("RISCV64")) &&
 		    !machdep->verify_symbol(nameptr, ec->st_value, ec->st_info))
 			continue;
 
@@ -5962,14 +5974,25 @@ generic_machdep_value_to_symbol(ulong value, ulong *offset)
 	return NULL;
 }	
 
+char *
+value_to_symstr(ulong value, char *buf, ulong radix)
+{
+	return _value_to_symstr(value, buf, radix, 0);
+}
+
+char *
+value_to_symstr_trace(ulong value, char *buf, ulong radix)
+{
+	return _value_to_symstr(value, buf, radix, 1);
+}
 
 /*
  *  For a given value, format a string containing the nearest symbol name
  *  plus the offset if appropriate.  Display the offset in the specified
  *  radix (10 or 16) -- if it's 0, set it to the current pc->output_radix.
  */
-char *
-value_to_symstr(ulong value, char *buf, ulong radix)
+static char *
+_value_to_symstr(ulong value, char *buf, ulong radix, int trace)
 {
         struct syment *sp;
         ulong offset;
@@ -5985,7 +6008,13 @@ value_to_symstr(ulong value, char *buf, ulong radix)
 	if ((radix != 10) && (radix != 16))
 		radix = 16;
 
-        if ((sp = value_search(value, &offset))) {
+	if (trace) {
+		sp = value_search(value-1, &offset);
+		offset++;
+	} else
+		sp = value_search(value, &offset);
+
+	if (sp) {
                 if (offset)
                         sprintf(buf, radix == 16 ? "%s+0x%lx" : "%s+%ld",
 				sp->name, offset);
@@ -10451,6 +10480,9 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "                  page_private: %ld\n", OFFSET(page_private));
 	fprintf(fp, "                page_page_type: %ld\n",
 		OFFSET(page_page_type));
+	fprintf(fp, "                page_compound_order: %ld\n", OFFSET(page_compound_order));
+	fprintf(fp, "                folio__folio_order: %ld\n", OFFSET(folio__folio_order));
+	fprintf(fp, "                folio__flags_1: %ld\n", OFFSET(folio__flags_1));
 
 	fprintf(fp, "        trace_print_flags_mask: %ld\n",
 		OFFSET(trace_print_flags_mask));
@@ -11961,6 +11993,9 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
 	fprintf(fp, "                    page_flags: %ld\n", SIZE(page_flags));
+	fprintf(fp, "           page_compound_order: %ld\n", SIZE(page_compound_order));
+	fprintf(fp, "            folio__folio_order: %ld\n", SIZE(folio__folio_order));
+	fprintf(fp, "                folio__flags_1: %ld\n", SIZE(folio__flags_1));
 	fprintf(fp, "             trace_print_flags: %ld\n", SIZE(trace_print_flags));
         fprintf(fp, "              free_area_struct: %ld\n", 
 		SIZE(free_area_struct));
