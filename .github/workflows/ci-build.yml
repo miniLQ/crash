@@ -1,4 +1,4 @@
-name: Build
+name: Build crash ARM64 ramdump parser
 
 on:
   push:
@@ -6,92 +6,33 @@ on:
 
 jobs:
   build:
-    name: Build
+    name: Build x86_64 crash for ARM64 ramdump
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        arch:
-        - x86_64
- #       - aarch64
- #       - s390x
- #       - powerpc64
- #       - x86
- #       - riscv64
- #       - mips
- #       - alpha
- #       - sparc64
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set Environment
-      env:
-        ARCH: ${{ matrix.arch }}
-      run: |
-        case $ARCH in
-          x86)         GNU_ARCH="i686-linux-gnu" ;;
-          x86_64)      CROSS_COMPILER_PKG="gcc-x86-64-linux-gnu"
-                       CROSS_COMPILER_PKG+=" g++-x86-64-linux-gnu"
-                       GNU_ARCH="$ARCH-linux-gnu" ;;
-          *)           GNU_ARCH="$ARCH-linux-gnu" ;;
-        esac
-
-        if [ -n "$GNU_ARCH" ]; then
-          if [ -z "$CROSS_COMPILER_PKG" ]; then
-            CROSS_COMPILER_PKG="gcc-$GNU_ARCH"
-            CROSS_COMPILER_PKG+=" g++-$GNU_ARCH"
-          fi
-          EXTRA_PKGS+=" $CROSS_COMPILER_PKG"
-          CROSS_COMPILE="$GNU_ARCH"
-        fi
-
-        echo "EXTRA_PKGS=$EXTRA_PKGS" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$CROSS_COMPILE" >> $GITHUB_ENV
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-
-    - name: Compute date string (PST/PDT)
+    - name: Compute date string
       run: echo "DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
 
-    - name: Install deps for crash-utility building
+    - name: Install deps
       run: |
         sudo apt-get update
-        sudo apt-get install make gcc g++ bison flex texinfo wget patch tar build-essential libc-dev autoconf automake libncurses-dev
+        sudo apt-get install -y \
+          make gcc g++ bison flex texinfo wget patch tar zip \
+          build-essential libc-dev autoconf automake \
+          libncurses-dev zlib1g-dev
 
-    - name: Install corss compile tool pkgs
-      if: env.EXTRA_PKGS != ''
+    - name: Build crash for ARM64 ramdump
       run: |
-        sudo apt-get update
-        sudo apt-get -q=2 install ${{ env.EXTRA_PKGS }}
+        make target=ARM64 -j$(nproc) warn
+        file crash
+        ./crash --version || true
 
-    - name: Cross compile gmp lib
-      run: |
-        mkdir $GITHUB_WORKSPACE/libtools
-        wget https://gcc.gnu.org/pub/gcc/infrastructure/gmp-6.2.1.tar.bz2
-        tar -jxvf gmp-6.2.1.tar.bz2
-        cd gmp-6.2.1
-        ./configure --host=${{ env.CROSS_COMPILE }} --prefix=$GITHUB_WORKSPACE/libtools
-        make -j`nproc`
-        sudo make install
-        cd ..
-    - name: Cross compile mpfr lib
-      run: |
-        wget https://gcc.gnu.org/pub/gcc/infrastructure/mpfr-4.1.0.tar.bz2
-        tar -jxvf mpfr-4.1.0.tar.bz2
-        cd mpfr-4.1.0
-        ./configure --host=${{ env.CROSS_COMPILE }} --prefix=$GITHUB_WORKSPACE/libtools --with-gmp=$GITHUB_WORKSPACE/libtools
-        make -j`nproc`
-        sudo make install
-        cd ..
-    - name: Cross compile crash-utility
-      run: |
-        sudo cp $GITHUB_WORKSPACE/libtools/include/* /usr/include/
-        sudo cp -r $GITHUB_WORKSPACE/libtools/lib/* /usr/lib/
-        make CROSS_COMPILE=${{ env.CROSS_COMPILE }}- -j`nproc` warn
-  
     - name: Compress files
       run: |
-        ZIP_NAME="crash_${{ env.ARCH }}-${{ env.DATE }}.zip"
+        ZIP_NAME="crash_x86_64_for_arm64_ramdump-${{ env.DATE }}.zip"
         zip -9 "${ZIP_NAME}" crash
         echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
@@ -99,13 +40,12 @@ jobs:
       id: check_tag
       run: |
         git fetch --tags
-        if git rev-parse --verify --quiet "refs/tags/$TAG_NAME" >/dev/null; then
+        TAG_NAME="crash.arm64-ramdump.${{ env.DATE }}"
+        if git rev-parse --verify --quiet "refs/tags/${TAG_NAME}" >/dev/null; then
           echo "exists=true" >> $GITHUB_OUTPUT
         else
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
-      env:
-        TAG_NAME: crash.${{ env.DATE }}
 
     - name: Create Release
       if: steps.check_tag.outputs.exists == 'false'
@@ -114,12 +54,13 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
       with:
-        tag_name: crash.${{ env.DATE }}
-        release_name: Release crash.${{ env.DATE }}
+        tag_name: crash.arm64-ramdump.${{ env.DATE }}
+        release_name: Release crash ARM64 ramdump ${{ env.DATE }}
         draft: false
         prerelease: false
-      
+
     - name: Upload Release Asset
+      if: steps.check_tag.outputs.exists == 'false'
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
@@ -129,9 +70,6 @@ jobs:
         asset_name: ${{ env.ZIP_NAME }}
         asset_content_type: application/zip
 
-    - name: Checking and Clean up
+    - name: Clean up
       run: |
-        echo "Run command: file crash ..."
-        file crash
-        echo "Clean up for compiling ..."
-        make CROSS_COMPILE=${{ env.CROSS_COMPILE }}- -j`nproc` clean
+        make target=ARM64 clean || true
