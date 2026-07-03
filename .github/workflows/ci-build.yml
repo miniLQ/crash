@@ -2,11 +2,11 @@ name: Build crash ARM64 ramdump parser
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "mtk-release" ]
 
 jobs:
   build:
-    name: Build x86_64 crash for ARM64 ramdump
+    name: Build x86_64 crash for ARM64 ramdump only for MTK
     runs-on: ubuntu-24.04
 
     steps:
@@ -41,7 +41,7 @@ jobs:
       id: check_tag
       run: |
         git fetch --tags
-        TAG_NAME="crash.arm64-ramdump.${{ env.DATE }}"
+        TAG_NAME="mtk-crash.arm64-ramdump.${{ env.DATE }}"
         if git rev-parse --verify --quiet "refs/tags/${TAG_NAME}" >/dev/null; then
           echo "exists=true" >> $GITHUB_OUTPUT
         else
