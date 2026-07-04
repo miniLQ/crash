@@ -5344,8 +5344,8 @@ arm64_set_va_bits_by_tcr(void)
 {
 	ulong value;
 
-	if (arm64_get_vmcoreinfo(&value, "NUMBER(TCR_EL1_T1SZ)", NUM_DEC) ||
-		arm64_get_vmcoreinfo(&value, "NUMBER(tcr_el1_t1sz)", NUM_DEC)) {
+	if (arm64_get_vmcoreinfo(&value, "NUMBER(TCR_EL1_T1SZ)", NUM_HEX) ||
+		arm64_get_vmcoreinfo(&value, "NUMBER(tcr_el1_t1sz)", NUM_HEX)) {
 		/* See ARMv8 ARM for the description of
 		 * TCR_EL1.T1SZ and how it can be used
 		 * to calculate the vabits_actual
@@ -5355,6 +5355,20 @@ arm64_set_va_bits_by_tcr(void)
 		 * vabits_actual = 64 - T1SZ;
 		 */
 		value = 64 - value;
+
+		/* [Workaround]
+		 * MTK mrdump may emit:
+		 * NUMBER(TCR_EL1_T1SZ)=25
+		 * without 0x prefix. NUM_HEX parses it as 0x25,
+		 * producing invalid VA_BITS_ACTUAL=27.
+		 */
+		if (value < 32 || value > 52) {
+			if (arm64_get_vmcoreinfo(&value, "NUMBER(TCR_EL1_T1SZ)", NUM_DEC) ||
+			    arm64_get_vmcoreinfo(&value, "NUMBER(tcr_el1_t1sz)", NUM_DEC)) {
+				value = 64 - value;
+			}
+		}
+
 		if (CRASHDEBUG(1))
 			fprintf(fp,  "vmcoreinfo : vabits_actual: %ld\n", value);
 		machdep->machspec->VA_BITS_ACTUAL = value;
